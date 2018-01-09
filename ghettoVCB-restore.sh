@@ -5,7 +5,7 @@
 
 ###### DO NOT EDIT PASS THIS LINE ######
 
-LAST_MODIFIED_DATE=2015_04_04
+LAST_MODIFIED_DATE=2018_09_01
 VERSION=1
 VERSION_STRING=${LAST_MODIFIED_DATE}_${VERSION}
 
@@ -21,10 +21,14 @@ printUsage() {
     echo "#"
     echo "###############################################################################"
     echo
-    echo "Usage: $0 -c [VM_BACKUP_UP_LIST] -l [LOG_FILE] -d [DRYRUN_DEBUG_INFO]"
+    echo "Usage: $0 -c [VM_BACKUP_UP_LIST] -l [LOG_FILE] -d [DRYRUN_DEBUG_INFO] -m [VM_TO_RESTORE] -s [DATASTORE_TO_RESTORE_TO] -f [RESTORE_DISK_FORMAT] -n [RESTORE_VM_NAME]"
     echo
     echo "OPTIONS:"
     echo "   -c     VM backup list"
+    echo "   -m     Name of VM to restore (override -c, need -s, -f and -n options)"
+    echo "   -s     Datastore to restore to"
+    echo "   -f     Retore disk format [1|2|3|4] : 1 = zeroedthick,2 = 2gbsparse,3 = thin,4 = eagerzeroedthick"
+    echo "   -n     Restore VM name"
     echo "   -l     File ot output logging"
     echo "   -d     Dryrun/Debug Info [1|2]"
     echo
@@ -36,6 +40,7 @@ printUsage() {
     echo -e "\nDryrun/Debug Info (dryrun only)"
     echo -e "\t$0 -c vms_to_restore -d 1"
     echo -e "\t$0 -c vms_to_restore -d 2"
+    echo -e "\t$0 -m vm_to_restore -s /vmfs/volume/local-storage -f 1 -n RESTORED_VM_DISPLAY_NAME"
     echo
     exit 1
 }
@@ -59,8 +64,16 @@ sanityCheck() {
         exit 1
     fi
 
-    if [[ ${NUM_OF_ARGS} -ne 2 ]] && [[ ${NUM_OF_ARGS} -ne 4 ]] && [[ ${NUM_OF_ARGS} -ne 6 ]]; then
-        printUsage
+	# ensure options related to VM_ARG are present
+	if [ -n "${VM_ARG}" ]; then
+		if [[ -z ${DATASTORE_TO_RESTORE_TO_ARG} ] || [ -z ${RESTORE_DISK_FORMAT_ARG} ] || [ -z ${RESTORE_VM_NAME_ARG} ]  ]; then
+			printUsage
+		fi	
+	#ensure input file exists
+    elif [ ! -f "${CONFIG_FILE}" ]; then
+        logger "ERROR: \"${CONFIG_FILE}\" input file does not exists\n"
+        echo -e "ERROR: \"${CONFIG_FILE}\" input file does not exists\n"
+        exit 1
     fi
 
     #log to stdout or to logfile
@@ -102,13 +115,6 @@ sanityCheck() {
 
     TAR="tar"
     [[ ! -f /bin/tar ]] && TAR="busybox tar"
-
-    #ensure input file exists
-    if [ ! -f "${CONFIG_FILE}" ]; then
-        logger "ERROR: \"${CONFIG_FILE}\" input file does not exists\n"
-        echo -e "ERROR: \"${CONFIG_FILE}\" input file does not exists\n"
-        exit 1
-    fi
 }
 
 startTimer() {
@@ -133,22 +139,13 @@ endTimer() {
     echo
 }
 
-ghettoVCBrestore() {
-    VM_FILE=$1
-
-    startTimer
-
-    ORIG_IFS=${IFS}
-    IFS='
-'
-
-    for LINE in $(cat "${VM_FILE}" | sed '/^$/d' | sed -e '/^#/d' | sed -e 's/^[[:blank:]]*//;s/[[:blank:]]*$//'); do
-        VM_TO_RESTORE=$(echo "${LINE}" | awk -F ';' '{print $1}' | sed 's/"//g' | sed -e 's/^[[:blank:]]*//;s/[[:blank:]]*$//')
-        DATASTORE_TO_RESTORE_TO=$(echo "${LINE}" | awk -F ';' '{print $2}' | sed 's/"//g' | sed -e 's/^[[:blank:]]*//;s/[[:blank:]]*$//')
-        RESTORE_DISK_FORMAT=$(echo "${LINE}" | awk -F ';' '{print $3}' | sed 's/"//g' | sed -e 's/^[[:blank:]]*//;s/[[:blank:]]*$//')
-        RESTORE_VM_NAME=$(echo "${LINE}" | awk -F ';' '{print $4}' | sed 's/"//g' | sed -e 's/^[[:blank:]]*//;s/[[:blank:]]*$//')
-
-        #figure the disk format to use
+ghettoVCBrestoreVM() {
+	VM_TO_RESTORE $1
+	DATASTORE_TO_RESTORE_TO $2
+	RESTORE_DISK_FORMAT $3
+	RESTORE_VM_NAME $4
+		
+	#figure the disk format to use
         if [ "${RESTORE_DISK_FORMAT}" -eq 1 ]; then
             FORMAT_STRING=zeroedthick
         elif [ "${RESTORE_DISK_FORMAT}" -eq 2 ]; then
@@ -368,10 +365,20 @@ if [ ! "${IS_TGZ}" == "1" ]; then
 fi
 
 VMDK_LIST_TO_MODIFY=''
-    done
-    unset IFS	
+}
 
-    endTimer
+ghettoVCBrestore() {
+    VM_FILE=$1
+
+    for LINE in $(cat "${VM_FILE}" | sed '/^$/d' | sed -e '/^#/d' | sed -e 's/^[[:blank:]]*//;s/[[:blank:]]*$//'); do
+        VM_TO_RESTORE=$(echo "${LINE}" | awk -F ';' '{print $1}' | sed 's/"//g' | sed -e 's/^[[:blank:]]*//;s/[[:blank:]]*$//')
+        DATASTORE_TO_RESTORE_TO=$(echo "${LINE}" | awk -F ';' '{print $2}' | sed 's/"//g' | sed -e 's/^[[:blank:]]*//;s/[[:blank:]]*$//')
+        RESTORE_DISK_FORMAT=$(echo "${LINE}" | awk -F ';' '{print $3}' | sed 's/"//g' | sed -e 's/^[[:blank:]]*//;s/[[:blank:]]*$//')
+        RESTORE_VM_NAME=$(echo "${LINE}" | awk -F ';' '{print $4}' | sed 's/"//g' | sed -e 's/^[[:blank:]]*//;s/[[:blank:]]*$//')
+
+ 		ghettoVCBrestoreVM ${VM_TO_RESTORE} ${DATASTORE_TO_RESTORE_TO} ${RESTORE_DISK_FORMAT} ${RESTORE_VM_NAME}
+ 		
+    done
 }
 
 ####################
@@ -381,7 +388,7 @@ VMDK_LIST_TO_MODIFY=''
 ####################
 
 #read user input
-while getopts ":c:l:d:" ARGS; do
+while getopts ":c:l:d:m:s:f:n:" ARGS; do
     case $ARGS in
         c) 
             CONFIG_FILE="${OPTARG}"
@@ -391,6 +398,18 @@ while getopts ":c:l:d:" ARGS; do
             ;;
         d)
             DEVEL_MODE="${OPTARG}"
+            ;;
+        m)
+            VM_ARG="${OPTARG}"
+            ;;
+        s)
+            DATASTORE_TO_RESTORE_TO_ARG="${OPTARG}"
+            ;;
+        f)
+            RESTORE_DISK_FORMAT_ARG="${OPTARG}"
+            ;;
+        n)
+            RESTORE_VM_NAME_ARG="${OPTARG}"
             ;;
         :)
             echo "Option -${OPTARG} requires an argument."
@@ -403,7 +422,21 @@ while getopts ":c:l:d:" ARGS; do
     esac
 done
 
-#performs a check on the number of commandline arguments + verifies $2 is a valid file
+#performs a check on commandline arguments + verifies CONFIG_FILE is a valid file
 sanityCheck $#
 
-ghettoVCBrestore ${CONFIG_FILE}
+ORIG_IFS=${IFS}
+IFS='
+'
+
+startTimer
+
+if [ -z "${VM_ARG}" ]; then
+	ghettoVCBrestore ${CONFIG_FILE}
+else
+	ghettoVCBrestoreVM ${VM_ARG} ${DATASTORE_TO_RESTORE_TO_ARG} ${RESTORE_DISK_FORMAT_ARG} ${RESTORE_VM_NAME_ARG}
+fi
+
+endTimer
+
+unset IFS	
